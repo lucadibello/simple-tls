@@ -19,9 +19,13 @@
 
 struct tls_version tls_1_2 = {.major = 3, .minor = 3};
 
+// This function is used to convert a number is a list of bytes encoded in
+// big-endian
 void num_to_bytes(uint64_t in, uint8_t *out, int count) {
-  // TODO: convert in into a list of network-order count bytes and write the
-  // result in out
+  for (int i = count - 1; i >= 0; i--) {
+    out[i] = in & 0xff;
+    in >>= 8;
+  }
 }
 
 void tls_record_free(struct tls_record *record) { free(record->fragment); }
