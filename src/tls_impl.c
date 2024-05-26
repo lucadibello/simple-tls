@@ -145,68 +145,149 @@ int tls_context_handshake_digest(struct tls_context *ctx, uint8_t *out) {
 
 int tls_context_derive_keys(struct tls_context *ctx,
                             const struct rsa_premaster_secret *premaster) {
+  // Serialize the RSA premaster secret: we write in a buffer the minor/major
+  // version and the actual secret
+  uint8_t premaster_secret[48];
+  premaster_secret[0] = premaster->version.major;
+  premaster_secret[1] = premaster->version.minor;
+  memcpy(premaster_secret + 2, premaster->random, 46);
 
-  // TODO serialize the RSA premaster secret
-  // TODO compute the ctx->master_secret by using the PRF function as described
+  // Compute the ctx->master_secret by using the PRF function as described
   // in the notes
+  uint8_t seed[77]; // 13 (label) + 32 (client random) + 32 (server random) = 77
+  memcpy(seed, "master secret", 13);
+  memcpy(seed + 13, ctx->client_random, 32);
+  memcpy(seed + 45, ctx->server_random, 32);
+  tls_prf(premaster_secret, sizeof(premaster_secret), // Premaster secret
+          seed, sizeof(seed),    // Seed = label + client_random + server_random
+          ctx->master_secret, 48 // Where to store the output (master secret)
+  );
 
   uint8_t key_block[96];
 
-  // TODO compute the key_block using the PRF function as described in the notes
+  // Compute the key_block using the PRF function as described in the notes
+  // The seed should be "key expansion" followed by the client random and the
+  // server random
+  uint8_t key_block_seed[77]; // 13 (label) + 32 (client random) + 32 (server
+                              // random) = 77
+  memcpy(key_block_seed, "key expansion", 13);
+  memcpy(key_block_seed + 13, ctx->client_random, 32);
+  memcpy(key_block_seed + 45, ctx->server_random, 32);
+  tls_prf(
+      ctx->master_secret, 48, // Computed master secret
+      key_block_seed,
+      sizeof(key_block_seed), // Seed = label + client_random + server_random
+      key_block, sizeof(key_block) // Where to store the output (key block)
+  );
 
+  // Extract the keys from the key_block
   memcpy(ctx->client_mac_key, key_block, 32);
   memcpy(ctx->server_mac_key, key_block + 32, 32);
   memcpy(ctx->client_enc_key, key_block + 64, 16);
   memcpy(ctx->server_enc_key, key_block + 80, 16);
 
+  // Rrtun 1 if everything went well
   return 1;
 }
 
 size_t tls_context_encrypt(struct tls_context *ctx,
                            const struct tls_record *record, uint8_t *out) {
 
-  // If out == NULL just return the length of the cipertext (including the IV)
-
-  // TODO randomly generate 16 bytes of IV and write them in out in clear
   int block_size = EVP_CIPHER_get_block_size(EVP_aes_128_cbc());
   uint8_t padding_len = 10;
   size_t cipher_len =
       record->length + SHA256_DIGEST_LENGTH + block_size + padding_len;
   uint8_t iv[block_size];
 
+  // Randomly generate 16 bytes of IV and write them in out in clear
+  for (int i = 0; i < block_size; i++)
+    iv[i] = rand() % 256;
+
+  // If out == NULL just return the length of the cipertext (including the IV)
   if (!out)
     return cipher_len;
 
   EVP_CIPHER_CTX *enc_ctx = EVP_CIPHER_CTX_new();
+
   if (!enc_ctx)
     return 0;
 
-  // Encrypt the plaintext
+  // Initialize the encryption context with the client_enc_key and the IV
   if (EVP_EncryptInit(enc_ctx, EVP_aes_128_cbc(), ctx->client_enc_key, iv) !=
       1) {
     EVP_CIPHER_CTX_free(enc_ctx);
     return 0;
   }
+
   // This line disables padding, you should do the padding yourself
   // if you remove this line it will use PCKS#7 padding which leads
   // to a bug that is quite nasty to debug
   EVP_CIPHER_CTX_set_padding(enc_ctx, 0);
 
-  // TODO encrypt the plaintext
+  // Pad the plaintext with random bytes to avoid information leakage
+  for (int i = 0; i < padding_len; i++)
+    record->fragment[record->length + i] = rand() % 256;
 
-  // TODO compute the HMAC code as described into the nodes and encrypt it by
+  // Encrypt the plaintext
+  int total_length = 0;
+  int len = 0;
+  if (EVP_EncryptUpdate(enc_ctx,          // Encryption context
+                        out,              // Output buffer
+                        &len,             // Length of the output buffer
+                        record->fragment, // Plaintext to encrypt
+                        record->length    // Length of the plaintext
+                        ) != 1) {
+    EVP_CIPHER_CTX_free(enc_ctx);
+    return 0;
+  }
+
+  // Update total length
+  total_length += len;
+
+  // compute the HMAC code as described into the notes and encrypt it by
   // using a second call to the EVP_EncryptUpdate function
+  unsigned char hmac[SHA256_DIGEST_LENGTH];
+  if (!HMAC(EVP_sha256(), ctx->client_mac_key, 32, record->fragment,
+            record->length, hmac, NULL)) {
+    EVP_CIPHER_CTX_free(enc_ctx);
+    return 0;
+  }
+  // encrypt the HMAC code
+  if (EVP_EncryptUpdate(enc_ctx, out + total_length, &len, hmac,
+                        SHA256_DIGEST_LENGTH) != 1) {
+    EVP_CIPHER_CTX_free(enc_ctx);
+    return 0;
+  }
 
-  // TODO compute the value used for padding and call the EVP_EncryptUpdate
-  // function
+  // Update total length
+  total_length += len;
 
-  // TODO remember to finalize the encryption process
+  // compute the value used for padding and call the EVP_EncryptUpdate function
+  // to encrypt it as well
+
+  // 1. compute the actual value used as padding
+  uint8_t padding[block_size]; // FIXME: I'm not sure if this is the right size
+  memset(padding, padding_len, padding_len);
+
+  // 2. encrypt the padding
+  if (EVP_EncryptUpdate(enc_ctx, out + total_length, &len, padding,
+                        padding_len) != 1) {
+    EVP_CIPHER_CTX_free(enc_ctx);
+    return 0;
+  }
+
+  // Finalize the encryption process
+  if (EVP_EncryptFinal(enc_ctx, out + total_length, &len) != 1) {
+    EVP_CIPHER_CTX_free(enc_ctx);
+    return 0;
+  }
+  // Update total length
+  total_length += padding_len;
 
   EVP_CIPHER_CTX_free(enc_ctx);
 
-  // TODO return the length of the ciphertext including the IV (it should be a
-  // multiple of 16)
-  return 100;
+  // Return the total length of the ciphertext
+  return block_size + total_length;
 }
 
 size_t tls_context_decrypt(struct tls_context *ctx,
@@ -359,7 +440,12 @@ error_handling:
 }
 
 void rsa_premaster_secret_init(struct rsa_premaster_secret *exchange) {
-  // TODO Generate a RSA premaster secret
+  // Set the minor / major version based on settings
+  exchange->version.major = tls_1_2.major;
+  exchange->version.minor = tls_1_2.minor;
+  // Now, generate 46 random bytes for the key
+  for (int i = 0; i < 46; i++)
+    exchange->random[i] = rand() % 256;
 }
 
 size_t rsa_premaster_marshall(const struct rsa_premaster_secret *premaster,
