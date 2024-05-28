@@ -154,20 +154,21 @@ int tls_context_derive_keys(struct tls_context *ctx,
 
   // Compute the ctx->master_secret by using the PRF function as described
   // in the notes
-  uint8_t seed[77]; // 13 (label) + 32 (client random) + 32 (server random) = 77
-  memcpy(seed, "master secret", 13);
-  memcpy(seed + 13, ctx->client_random, 32);
-  memcpy(seed + 45, ctx->server_random, 32);
-  tls_prf(premaster_secret, sizeof(premaster_secret), // Premaster secret
-          seed, sizeof(seed),    // Seed = label + client_random + server_random
-          ctx->master_secret, 48 // Where to store the output (master secret)
+  uint8_t master_key_secret[77]; // 13 (label) + 32 (client random) + 32 (server
+                                 // random) = 77
+  memcpy(master_key_secret, "master secret", 13);
+  memcpy(master_key_secret + 13, ctx->client_random, 32);
+  memcpy(master_key_secret + 45, ctx->server_random, 32);
+  tls_prf(
+      premaster_secret, sizeof(premaster_secret), // Premaster secret
+      master_key_secret,
+      sizeof(master_key_secret), // Seed = label + client_random + server_random
+      ctx->master_secret, 48     // Where to store the output (master secret)
   );
 
   uint8_t key_block[96];
 
   // Compute the key_block using the PRF function as described in the notes
-  // The seed should be "key expansion" followed by the client random and the
-  // server random
   uint8_t key_block_seed[77]; // 13 (label) + 32 (client random) + 32 (server
                               // random) = 77
   memcpy(key_block_seed, "key expansion", 13);
@@ -186,7 +187,7 @@ int tls_context_derive_keys(struct tls_context *ctx,
   memcpy(ctx->client_enc_key, key_block + 64, 16);
   memcpy(ctx->server_enc_key, key_block + 80, 16);
 
-  // Rrtun 1 if everything went well
+  // Return 1 if everything went well
   return 1;
 }
 
@@ -297,7 +298,7 @@ size_t tls_context_decrypt(struct tls_context *ctx,
 
   // the length of the plaintext should exclude the IV length
   // (only after decryption you can remove the padding and the HMAC)
-  size_t plain_len = record->length - block_size;
+  size_t cipher_len = record->length - block_size;
   if (!dec_ctx)
     return 0;
 
@@ -309,32 +310,83 @@ size_t tls_context_decrypt(struct tls_context *ctx,
 
   EVP_CIPHER_CTX_set_padding(dec_ctx, 0);
 
-  // TODO decrypt the fragment in record->fragment
-  // TODO finalize the decryption process
+  // Decrypt the fragment in record->fragment
+  int len = 0, total_len = 0;
+  uint8_t *ciphertext = record->fragment + block_size; // Skip the IV
+  uint8_t plaintext[cipher_len];
+  if (EVP_DecryptUpdate(dec_ctx, plaintext, &len, ciphertext, cipher_len) !=
+      1) {
+    EVP_CIPHER_CTX_free(dec_ctx);
+    return 0;
+  }
+  total_len += len;
+
+  // Finalize the decryption process
+  if (EVP_DecryptFinal(dec_ctx, plaintext + total_len, &len) != 1) {
+    EVP_CIPHER_CTX_free(dec_ctx);
+    return 0;
+  }
+  total_len += len;
 
   EVP_CIPHER_CTX_free(dec_ctx);
 
-  // TODO compute the length of padding by looking
+  // Compute the length of padding by looking
   // at the last byte of the decrypted text and remove the padding
+  uint8_t padding_len = plaintext[total_len - 1];
+  if (padding_len > block_size) {
+    return 0;
+  }
 
-  // TODO compute the expected HMAC code using the version in the
+  // Remove the padding from the overall length of the plaintext
+  size_t plain_len = total_len - padding_len;
+
+  // Compute the expected HMAC code using the version in the
   // record, the length of original message (the number of decrypted bytes
   // minus the length of the HMAC code and the length of the padding), and
   // the expected sequence number you can find in ctx->server_seq
+  uint8_t expected_hmac[SHA256_DIGEST_LENGTH];
+  size_t message_len = plain_len - SHA256_DIGEST_LENGTH;
+  if (!HMAC(EVP_sha256(), ctx->server_mac_key, 32, plaintext, message_len,
+            expected_hmac, NULL)) {
+    return 0;
+  }
 
-  // TODO copy ONLY the plaintext into out, i.e. remove padding and HMAC
+  // Compare the expected HMAC code with the HMAC code in the plaintext
+  if (memcmp((const void *)plain_len + message_len, expected_hmac,
+             SHA256_DIGEST_LENGTH)) {
+    return 0;
+  }
 
-  return plain_len;
+  // copy ONLY the plaintext into out, i.e. remove padding and HMAC
+  memcpy(out, plaintext, message_len);
+
+  // Return the length of the plaintext
+  return message_len;
 }
 
 void client_hello_init(struct client_hello *hello) {
-  // TODO initialize the fields of a client hello message
+  // Initialize the fields of a client hello message
   // You should support only the TLS_RSA_WITH_AES_128_CBC_SHA256
   // cipher suite and no compression.
   //
   // The client does not have to restore a previous session.
 
-  hello->sig_algo = 0x0401;
+  // Set the version to TLS 1.2
+  hello->version = tls_1_2;
+
+  // Generate random bytes for the client random field
+  hello->random.gmt_unix_time = time(NULL);
+  for (int i = 0; i < 28; i++)
+    hello->random.random_bytes[i] = rand() % 256;
+
+  // Setup the session compression method
+  hello->compression_method = 0x0; // No compression
+
+  // Setup the session compression method
+  hello->cipher_suite = 0x003C; // TLS_RSA_WITH_AES_128_CBC_SHA256 (0x003C)
+
+  // Setup the supported signature algorithm
+  hello->sig_algo = 0x0401; // SHA256 + RSA
 }
 
 size_t client_hello_marshall(const struct client_hello *hello, uint8_t *out) {
@@ -343,17 +395,47 @@ size_t client_hello_marshall(const struct client_hello *hello, uint8_t *out) {
   if (!out)
     return len;
 
-  // TODO write the contenst of the client hello message into out
+  // Write the contents of the client hello message into out
   // The required TLS extensions are already done for you
   //
   // The client does not have to restore a previous session.
 
-  num_to_bytes(8, out + 45, 2);
-  num_to_bytes(0xd, out + 47, 2);
-  num_to_bytes(0x4, out + 49, 2);
-  num_to_bytes(0x2, out + 51, 2);
-  num_to_bytes(hello->sig_algo, out + 53, 2);
+  // Write the protocol version
+  out[0] = hello->version.major;
+  out[1] = hello->version.minor;
 
+  // Write the client timestamp
+  uint32_t gmt_unix_time = htons(hello->random.gmt_unix_time);
+  memcpy(out + 2, &gmt_unix_time, 4);
+
+  // Write the client random bytes
+  memcpy(out + 6, hello->random.random_bytes, 28);
+
+  // Write the session id (0 as we do not want to restore a previous session)
+  out[34] = 0;
+
+  // Write the cipher suites length
+  out[35] = 0x00;
+  out[36] = 0x02;
+
+  // Write the actual cipher suite
+  uint16_t cipher_suite = htons(hello->cipher_suite);
+  memcpy(out + 37, &cipher_suite, 2);
+
+  // Write the compression methods length (1 byte)
+  out[39] = 0x01;
+
+  // Write the actual compression method (0x00 for no compression)
+  out[40] = hello->compression_method;
+
+  // Write TLS extensions
+  num_to_bytes(8, out + 45, 2);   // Length of the extensions
+  num_to_bytes(0xd, out + 47, 2); // Extension type: signature algorithms
+  num_to_bytes(0x4, out + 49, 2); // Length of the extension data
+  num_to_bytes(0x2, out + 51, 2); // Length of the provided list of algorithms
+  num_to_bytes(hello->sig_algo, out + 53, 2); // A single algorithm
+
+  // Return the length of the marshalled message
   return len;
 }
 
@@ -388,7 +470,7 @@ int server_hello_recv(struct tls_context *ctx, struct server_hello *out) {
     return 0;
   }
 
-  // TODO use the contents of record.fragment to populate the filds of out
+  // TODO: Use the contents of record.fragment to populate the fields of out
 
   int ret = tls_context_hash_handshake(ctx, record.fragment, record.length);
   tls_record_free(&record);
@@ -407,7 +489,7 @@ X509 *server_cert_recv(const struct tls_context *ctx) {
   if (!tls_context_hash_handshake(ctx, record.fragment, record.length))
     goto error_handling;
 
-  // TODO read the certificate chain and return the first certificate (you may
+  // TODO: read the certificate chain and return the first certificate (you may
   // assume that there is only one certificate) Hint: use the d2i_X509 OpenSSL
   // function to deserialize the DER-encoded structure
   X509 *cert = NULL;
