@@ -289,34 +289,42 @@ size_t tls_context_encrypt(struct tls_context *ctx,
 size_t tls_context_decrypt(struct tls_context *ctx, const struct tls_record *record, uint8_t *out) {
   int block_size = EVP_CIPHER_get_block_size(EVP_aes_128_cbc());
   EVP_CIPHER_CTX *dec_ctx = EVP_CIPHER_CTX_new();
-  
+  printf("BLOCK SIZE: %d\n", block_size);
 
   // the length of the plaintext should exclude the IV length
   // (only after decryption you can remove the padding and the HMAC)
-  size_t cipher_len = record->length - block_size;
+  size_t plain_len = record->length - block_size;
+  printf("PLAIN LEN: %zu\n", plain_len);
+
   if (!dec_ctx)
     return 0;
-
+  printf("HERE 0.5\n");
+  
   if (EVP_DecryptInit(dec_ctx, EVP_aes_128_cbc(), ctx->server_enc_key, record->fragment) != 1) {
     EVP_CIPHER_CTX_free(dec_ctx);
+    printf("HERE 1\n");
     return 0;
   }
+  
+  printf("HERE 1.5\n");
 
   EVP_CIPHER_CTX_set_padding(dec_ctx, 0);
 
   // Decrypt the fragment in record->fragment
   int len = 0;
   uint8_t *ciphertext = record->fragment + block_size; // Skip the IV
-  uint8_t plaintext[cipher_len];
-  if (EVP_DecryptUpdate(dec_ctx, plaintext, &len, ciphertext, cipher_len) !=
+  uint8_t plaintext[plain_len];
+  if (EVP_DecryptUpdate(dec_ctx, plaintext, &len, ciphertext, plain_len) !=
       1) {
     EVP_CIPHER_CTX_free(dec_ctx);
+    printf("HERE 2\n");
     return 0;
   }
 
   // Finalize the decryption process
   if (EVP_DecryptFinal(dec_ctx, plaintext + len, &len) != 1) {
     EVP_CIPHER_CTX_free(dec_ctx);
+    printf("HERE 3\n");
     return 0;
   }
 
@@ -327,25 +335,46 @@ size_t tls_context_decrypt(struct tls_context *ctx, const struct tls_record *rec
   // NOTE: The padding is of size n, and all the n bytes have the value n-1
   uint8_t padding_len = plaintext[len - 1];
   if (padding_len > block_size) {
+    printf("HERE 4\n");
     return 0;
   }
-  printf("padding_len: %d\n", padding_len);
 
   // Remove the padding from the overall length of the plaintext
-  size_t plain_len = cipher_len - padding_len;
+  plain_len -= padding_len;
 
   // Compute the expected HMAC code using the version in the
   // record, the length of original message (the number of decrypted bytes
   // minus the length of the HMAC code and the length of the padding), and
   // the expected sequence number you can find in ctx->server_seq
   uint8_t expected_hmac[SHA256_DIGEST_LENGTH];
+  uint8_t hmac_data[plain_len + 13];
+ 
+  // Fill the hmac_data buffer with the necessary data
+  num_to_bytes(ctx->server_seq, hmac_data, 8);
+  hmac_data[8] = record->type;
+  hmac_data[9] = record->version.major;
+  hmac_data[10] = record->version.minor;
+  num_to_bytes(plain_len - SHA256_DIGEST_LENGTH, hmac_data + 11, 2);
+  memcpy(hmac_data + 13, plaintext, plain_len - SHA256_DIGEST_LENGTH); // Copy the plaintext
+
+  // Compute the actual HMAC code
   size_t message_len = plain_len - SHA256_DIGEST_LENGTH;
   if (!HMAC(EVP_sha256(), ctx->server_mac_key, 32, plaintext, message_len, expected_hmac, NULL)) {
+    printf("HERE 5\n");
+    return 0;
+  }
+  
+  // Compare the expected HMAC code with the one in the plaintext
+  if (memcmp(expected_hmac, plaintext + message_len, SHA256_DIGEST_LENGTH) != 0) {
+    printf("HERE 6\n");
     return 0;
   }
 
   // copy ONLY the plaintext into out, i.e. remove padding and HMAC
-  memcpy(out, plaintext, message_len);
+  if (out)
+    memcpy(out, plaintext, message_len);
+
+  printf("LEN: %zu\n", message_len);
 
   // Return the length of the plaintext
   return message_len;
