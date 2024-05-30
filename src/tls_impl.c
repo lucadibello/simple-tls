@@ -172,8 +172,8 @@ int tls_context_derive_keys(struct tls_context *ctx,
   uint8_t key_block_seed[77]; // 13 (label) + 32 (client random) + 32 (server
                               // random) = 77
   memcpy(key_block_seed, "key expansion", 13);
-  memcpy(key_block_seed + 13, ctx->client_random, 32);
-  memcpy(key_block_seed + 45, ctx->server_random, 32);
+  memcpy(key_block_seed + 13, ctx->server_random, 32);
+  memcpy(key_block_seed + 45, ctx->client_random, 32);
   tls_prf(
       ctx->master_secret, 48, // Computed master secret
       key_block_seed,
@@ -195,10 +195,15 @@ size_t tls_context_encrypt(struct tls_context *ctx,
                            const struct tls_record *record, uint8_t *out) {
 
   int block_size = EVP_CIPHER_get_block_size(EVP_aes_128_cbc());
-  uint8_t padding_len = 10;
-  size_t cipher_len =
-      record->length + SHA256_DIGEST_LENGTH + block_size + padding_len;
   uint8_t iv[block_size];
+  
+  // Compute the padding length
+  int padding_len = block_size - (record->length % block_size);
+  if (padding_len == 0) // we always need to pad!
+    padding_len = block_size;
+
+  // Compute the length of the resulting ciohertext
+  size_t cipher_len = record->length + SHA256_DIGEST_LENGTH + block_size + padding_len;
 
   // Randomly generate 16 bytes of IV and write them in out in clear
   for (int i = 0; i < block_size; i++)
@@ -230,8 +235,7 @@ size_t tls_context_encrypt(struct tls_context *ctx,
     record->fragment[record->length + i] = rand() % 256;
 
   // Encrypt the plaintext
-  int total_length = 0;
-  int len = 0;
+  int len;
   if (EVP_EncryptUpdate(enc_ctx,          // Encryption context
                         out,              // Output buffer
                         &len,             // Length of the output buffer
@@ -241,10 +245,7 @@ size_t tls_context_encrypt(struct tls_context *ctx,
     EVP_CIPHER_CTX_free(enc_ctx);
     return 0;
   }
-
-  // Update total length
-  total_length += len;
-
+  
   // compute the HMAC code as described into the notes and encrypt it by
   // using a second call to the EVP_EncryptUpdate function
   unsigned char hmac[SHA256_DIGEST_LENGTH];
@@ -254,47 +255,43 @@ size_t tls_context_encrypt(struct tls_context *ctx,
     return 0;
   }
   // encrypt the HMAC code
-  if (EVP_EncryptUpdate(enc_ctx, out + total_length, &len, hmac,
+  if (EVP_EncryptUpdate(enc_ctx, out + len, &len, hmac,
                         SHA256_DIGEST_LENGTH) != 1) {
     EVP_CIPHER_CTX_free(enc_ctx);
     return 0;
   }
-
-  // Update total length
-  total_length += len;
-
+ 
   // compute the value used for padding and call the EVP_EncryptUpdate function
   // to encrypt it as well
 
   // 1. compute the actual value used as padding
-  uint8_t padding[block_size]; // FIXME: I'm not sure if this is the right size
+  uint8_t padding[padding_len];
   memset(padding, padding_len, padding_len);
 
   // 2. encrypt the padding
-  if (EVP_EncryptUpdate(enc_ctx, out + total_length, &len, padding,
+  if (EVP_EncryptUpdate(enc_ctx, out + len, &len, padding,
                         padding_len) != 1) {
     EVP_CIPHER_CTX_free(enc_ctx);
     return 0;
   }
 
   // Finalize the encryption process
-  if (EVP_EncryptFinal(enc_ctx, out + total_length, &len) != 1) {
+  if (EVP_EncryptFinal(enc_ctx, out + len, &len) != 1) {
     EVP_CIPHER_CTX_free(enc_ctx);
     return 0;
   }
-  // Update total length
-  total_length += padding_len;
 
   EVP_CIPHER_CTX_free(enc_ctx);
 
   // Return the total length of the ciphertext
-  return block_size + total_length;
+  return cipher_len;
 }
 
 size_t tls_context_decrypt(struct tls_context *ctx,
                            const struct tls_record *record, uint8_t *out) {
   int block_size = EVP_CIPHER_get_block_size(EVP_aes_128_cbc());
   EVP_CIPHER_CTX *dec_ctx = EVP_CIPHER_CTX_new();
+  
 
   // the length of the plaintext should exclude the IV length
   // (only after decryption you can remove the padding and the HMAC)
@@ -311,7 +308,7 @@ size_t tls_context_decrypt(struct tls_context *ctx,
   EVP_CIPHER_CTX_set_padding(dec_ctx, 0);
 
   // Decrypt the fragment in record->fragment
-  int len = 0, total_len = 0;
+  int len = 0;
   uint8_t *ciphertext = record->fragment + block_size; // Skip the IV
   uint8_t plaintext[cipher_len];
   if (EVP_DecryptUpdate(dec_ctx, plaintext, &len, ciphertext, cipher_len) !=
@@ -319,26 +316,24 @@ size_t tls_context_decrypt(struct tls_context *ctx,
     EVP_CIPHER_CTX_free(dec_ctx);
     return 0;
   }
-  total_len += len;
 
   // Finalize the decryption process
-  if (EVP_DecryptFinal(dec_ctx, plaintext + total_len, &len) != 1) {
+  if (EVP_DecryptFinal(dec_ctx, plaintext + len, &len) != 1) {
     EVP_CIPHER_CTX_free(dec_ctx);
     return 0;
   }
-  total_len += len;
 
   EVP_CIPHER_CTX_free(dec_ctx);
 
   // Compute the length of padding by looking
   // at the last byte of the decrypted text and remove the padding
-  uint8_t padding_len = plaintext[total_len - 1];
+  uint8_t padding_len = plaintext[len - 1];
   if (padding_len > block_size) {
     return 0;
   }
 
   // Remove the padding from the overall length of the plaintext
-  size_t plain_len = total_len - padding_len;
+  size_t plain_len = cipher_len - padding_len;
 
   // Compute the expected HMAC code using the version in the
   // record, the length of original message (the number of decrypted bytes
