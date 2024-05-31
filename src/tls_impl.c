@@ -494,7 +494,7 @@ int server_hello_recv(struct tls_context *ctx, struct server_hello *out) {
   if (!out)
     return 0;
 
-  // TODO: Use the contents of record.fragment to populate the fields of out
+  // Now, we copy the data from the record fragment to the local context
   size_t offset = 4; // We use the offset to skip the message type + size field
 
   // Read the version from the record fragment and store it in the out struct
