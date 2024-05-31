@@ -458,6 +458,7 @@ size_t client_hello_marshall(const struct client_hello *hello, uint8_t *out) {
   // Return the length of the marshalled message
   return len;
 }
+
 int client_hello_send(struct tls_context *ctx) {
   struct client_hello hello;
   client_hello_init(&hello);
@@ -489,10 +490,56 @@ int server_hello_recv(struct tls_context *ctx, struct server_hello *out) {
     return 0;
   }
 
-  // TODO: Use the contents of record.fragment to populate the fields of out
+  // Ensure that the out pointer is not NULL
+  if (!out)
+    return 0;
 
+  // TODO: Use the contents of record.fragment to populate the fields of out
+  size_t offset = 4; // We use the offset to skip the message type + size field
+
+  // Read the version from the record fragment and store it in the out struct
+  out->version.major = record.fragment[offset];
+  out->version.minor = record.fragment[offset + 1];
+  offset += 2; 
+  
+  // Read the timestamp from the record fragment
+  uint32_t gmt_unix_time;
+  memcpy(&gmt_unix_time, record.fragment + offset, 4);
+  // NOTE: Convert to host byte order
+  out->random.gmt_unix_time = ntohl(gmt_unix_time); 
+  offset += 4;
+ 
+  // Copy the random bytes from the record fragment
+  memcpy(out->random.random_bytes, record.fragment + offset, 28);
+  offset += 28;
+  
+  // Save the server random bytes in the context
+  memcpy(ctx->server_random, &gmt_unix_time, 4);
+  memcpy(ctx->server_random + 4, out->random.random_bytes, 28);
+
+  // Read the session ID length
+  out->session_id_len = record.fragment[offset];
+  offset += 1;
+ 
+  // Copy the session ID from the record fragment
+  memcpy(out->session_id, record.fragment + offset, out->session_id_len);
+  offset += out->session_id_len;
+  
+  // Now, read the cipher suite from the record fragment
+  memcpy(&out->cipher_suite, record.fragment + offset, 2);
+  // NOTE: Convert to host byte order
+  out->cipher_suite = ntohs(out->cipher_suite); 
+  offset += 2;
+
+  // Read the compression method
+  out->compression_method = record.fragment[offset];
+  offset += 1;
+  
+  // Hash the handshake message
   int ret = tls_context_hash_handshake(ctx, record.fragment, record.length);
+  // Free resources
   tls_record_free(&record);
+  // If the hashing was successful, return 1 oterwise return 0
   return ret == 1;
 }
 
