@@ -298,89 +298,78 @@ size_t tls_context_decrypt(struct tls_context *ctx, const struct tls_record *rec
   int block_size = EVP_CIPHER_get_block_size(EVP_aes_128_cbc());
   EVP_CIPHER_CTX *dec_ctx = EVP_CIPHER_CTX_new();
 
-  // the length of the plaintext should exclude the IV length
-  // (only after decryption you can remove the padding and the HMAC)
-  size_t plain_len = record->length - block_size;
+  // The length of the ciphertext excluding the IV
+  size_t cipher_len = record->length - block_size;
 
   if (!dec_ctx)
     return 0;
   
-  if (EVP_DecryptInit(dec_ctx, EVP_aes_128_cbc(), ctx->server_enc_key,
-                      record->fragment) != 1) {
+  // Initialize decryption context with the IV
+  if (EVP_DecryptInit(dec_ctx, EVP_aes_128_cbc(), ctx->server_enc_key, record->fragment) != 1) {
     EVP_CIPHER_CTX_free(dec_ctx);
     return 0;
   }
   
   EVP_CIPHER_CTX_set_padding(dec_ctx, 0);
 
-  // Decrypt the fragment in record->fragment
+  // Decrypt the fragment
   int len;
-  uint8_t plaintext[plain_len];
-  if (EVP_DecryptUpdate(dec_ctx, plaintext, &len, 
-                        record->fragment + block_size, plain_len) != 1) {
+  uint8_t plaintext[cipher_len + block_size];  // buffer size should consider padding
+  if (EVP_DecryptUpdate(dec_ctx, plaintext, &len, record->fragment + block_size, cipher_len) != 1) {
     EVP_CIPHER_CTX_free(dec_ctx);
     return 0;
   }
+  int plaintext_len = len;
 
   // Finalize the decryption process
   if (EVP_DecryptFinal(dec_ctx, plaintext + len, &len) != 1) {
     EVP_CIPHER_CTX_free(dec_ctx);
     return 0;
   }
+  plaintext_len += len;
 
   EVP_CIPHER_CTX_free(dec_ctx);
-  
-  // Compute the length of padding by looking
-  // at the last byte of the decrypted text and remove the padding
-  // NOTE: The padding is of size n, and all the n bytes have the value n-1
-  uint8_t padding_len = plaintext[len - 1];
-  printf("PADDING LEN: %d\n", padding_len);
+
+  // Compute the padding length by looking at the last byte of the decrypted text
+  uint8_t padding_len = plaintext[plaintext_len - 1] + 1;
+  // If the padding length hsa a value greater than the block size, return 0
+  // as the padding has is invalid 
   if (padding_len > block_size) {
     return 0;
   }
 
-  // Remove the padding from the overall length of the plaintext
-  plain_len -= padding_len;
-  printf("PLAIN LEN: %zu\n", plain_len);
+  // Remove the padding from the plaintext length
+  plaintext_len -= padding_len;
 
-  // Compute the expected HMAC code using the version in the
-  // record, the length of original message (the number of decrypted bytes
-  // minus the length of the HMAC code and the length of the padding), and
-  // the expected sequence number you can find in ctx->server_seq
+  // Compute the expected HMAC code
   uint8_t expected_hmac[SHA256_DIGEST_LENGTH];
-  uint8_t hmac_data[plain_len + 13];
- 
+  uint8_t hmac_data[plaintext_len + 13 - SHA256_DIGEST_LENGTH];
+
   // Fill the hmac_data buffer with the necessary data
   num_to_bytes(ctx->server_seq, hmac_data, 8);
   hmac_data[8] = record->type;
   hmac_data[9] = record->version.major;
   hmac_data[10] = record->version.minor;
-  num_to_bytes(plain_len - SHA256_DIGEST_LENGTH, hmac_data + 11, 2);
-  memcpy(hmac_data + 13, plaintext, plain_len - SHA256_DIGEST_LENGTH); // Copy the plaintext
+  num_to_bytes(plaintext_len - SHA256_DIGEST_LENGTH, hmac_data + 11, 2);
+  memcpy(hmac_data + 13, plaintext, plaintext_len - SHA256_DIGEST_LENGTH);
 
   // Compute the actual HMAC code
-  size_t message_len = plain_len - SHA256_DIGEST_LENGTH;
-  if (!HMAC(EVP_sha256(), ctx->server_mac_key, 32, plaintext, message_len, expected_hmac, NULL)) {
-    printf("HERE 5\n");
+  if (!HMAC(EVP_sha256(), ctx->server_mac_key, sizeof(ctx->server_mac_key), hmac_data, sizeof(hmac_data), expected_hmac, NULL)) {
     return 0;
   }
-  
+
   // Compare the expected HMAC code with the one in the plaintext
-  if (memcmp(expected_hmac, plaintext + message_len, SHA256_DIGEST_LENGTH) != 0) {
-    printf("HERE 6\n");
+  if (memcmp(expected_hmac, plaintext + plaintext_len - SHA256_DIGEST_LENGTH, SHA256_DIGEST_LENGTH) != 0) {
     return 0;
   }
 
-  // copy ONLY the plaintext into out, i.e. remove padding and HMAC
+  // Copy the plaintext to the output buffer, excluding the padding and HMAC
   if (out)
-    memcpy(out, plaintext, message_len);
-
-  printf("LEN: %zu\n", message_len);
+    memcpy(out, plaintext, plaintext_len - SHA256_DIGEST_LENGTH);
 
   // Return the length of the plaintext
-  return message_len;
+  return plaintext_len - SHA256_DIGEST_LENGTH;
 }
-
 void client_hello_init(struct client_hello *hello) {
   // Initialize the fields of a client hello message
   // You should support only the TLS_RSA_WITH_AES_128_CBC_SHA256
