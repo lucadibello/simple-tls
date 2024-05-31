@@ -1,12 +1,22 @@
-OPENSSL_DIR := /opt/homebrew/opt/openssl
 CC := gcc
 COMPILE := $(CC) -c
-LINK := $(CC) -L$(OPENSSL_DIR)/lib -lssl -lcrypto
+LINK := $(CC)
 SRC_DIR := src/
 TEST_DIR := test/
 BUILD_DIR := build/
 OBJS_DIR := $(BUILD_DIR)objs/
-CFLAGS := -I. -I$(SRC_DIR) -Wall -Werror -g -I$(OPENSSL_DIR)/include
+
+# Default flags
+CFLAGS := -I. -I$(SRC_DIR) -Wall -Werror -g
+LDFLAGS := -lssl -lcrypto
+
+# Check for macOS and set the OpenSSL paths accordingly
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S), Darwin)
+    OPENSSL_DIR := /opt/homebrew/opt/openssl
+    CFLAGS += -I$(OPENSSL_DIR)/include
+    LDFLAGS += -L$(OPENSSL_DIR)/lib
+endif
 
 CLIENT_SRCS := $(SRC_DIR)tls_impl.c \
   $(SRC_DIR)simple_tls.c \
@@ -41,17 +51,14 @@ UNITY_OBJS := $(TEST_OBJS_DIR)unity.o \
 
 CFLAGS_TESTS := -I$(UNITY_DIR) -I$(UNITY_FIXTURE_DIR) -I$(UNITY_MEMORY_DIR)
 
-
-
 .PHONY: all
 all: $(BUILD_DIR)simple_tls $(BUILD_DIR)tls_server
 
 $(BUILD_DIR)simple_tls: $(CLIENT_OBJS) | build_dir
-	$(LINK) -o $@ $^
+	$(LINK) -o $@ $^ $(LDFLAGS)
 
-$(BUILD_DIR)tls_server: $(SERVER_SRCS) | build_dir
-	$(CC) $(CFLAGS) -L$(OPENSSL_DIR)/lib -lssl -lcrypto -o $@ $^
-
+$(BUILD_DIR)tls_server: $(SERVER_OBJS) | build_dir
+	$(LINK) -o $@ $^ $(LDFLAGS)
 
 $(OBJS_DIR)%.o: $(SRC_DIR)%.c | build_dir
 	$(CC) $(CFLAGS) -MM -MP -MT '$@' -o $(patsubst %.o,%.d,$@) $<
@@ -65,16 +72,12 @@ check: $(TEST_BUILD_DIR)run_tests
 check-valgrind: $(TEST_BUILD_DIR)run_tests
 	@valgrind --leak-check=full --show-leak-kinds=all --track-origins=yes -s ./$<
 
-
 $(TEST_BUILD_DIR)run_tests: $(UNITY_OBJS) \
   $(UNITY_TESTS_OBJS) \
   $(OBJS_DIR)tls_connection.o \
   $(OBJS_DIR)tls_impl.o \
   $(TEST_OBJS_DIR)run_tests.o | build_dir
-	$(LINK) -o $@ $^
-
-
-
+	$(LINK) -o $@ $^ $(LDFLAGS)
 
 $(TEST_OBJS_DIR)%.o: $(TEST_DIR)%.c | build_dir
 	$(CC) $(CFLAGS) $(CFLAGS_TESTS) -MM -MP -MT '$@' -o $(patsubst %.o,%.d,$@) $<
@@ -88,7 +91,6 @@ $(TEST_OBJS_DIR)%.o: $(UNITY_FIXTURE_DIR)%.c | build_dir
 
 $(TEST_OBJS_DIR)%.o: $(UNITY_MEMORY_DIR)%.c | build_dir
 	$(COMPILE) $(CFLAGS) $(CFLAGS_TESTS) -o $@ $<
-
 
 .PHONY: build_dir
 build_dir: $(BUILD_DIR) $(OBJS_DIR) $(TEST_DIR) $(TEST_OBJS_DIR)
@@ -104,7 +106,6 @@ $(TEST_BUILD_DIR):
 
 $(TEST_OBJS_DIR):
 	mkdir -p $@
-
 
 -include $(DEPENDS)
 -include $(TEST_DEPENDS)
