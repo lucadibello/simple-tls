@@ -65,7 +65,7 @@ TEST(server_hello, receiving)
 
     uint32_t server_time = 0;
     for (int i = 0; i < 4; ++i)
-	server_time = (server_time << 8) + read_buf[11 + i];
+      server_time = (server_time << 8) + read_buf[11 + i];
 
     TEST_ASSERT_EQUAL_HEX32_MESSAGE(server_time,
 				    hello.random.gmt_unix_time,
