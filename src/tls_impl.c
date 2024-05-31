@@ -268,12 +268,6 @@ size_t tls_context_encrypt(struct tls_context *ctx,
   uint8_t padding[padding_len];
   memset(padding, padding_len - 1, padding_len);
   
-  // Print the padding length and the actual value of the padding
-  printf("PADDING LEN: %d\n", padding_len);
-  printf("PADDING: ");
-  printf("%02x", padding[0]);
-  printf("\n");
-
   // Encrypt the padding
   if (EVP_EncryptUpdate(enc_ctx, out + out_len, &len, padding, padding_len) != 1) {
     EVP_CIPHER_CTX_free(enc_ctx);
@@ -396,55 +390,74 @@ void client_hello_init(struct client_hello *hello) {
 }
 
 size_t client_hello_marshall(const struct client_hello *hello, uint8_t *out) {
-  size_t len = 55;
-
+  int len = 55;
   if (!out)
     return len;
 
-  // Write the contents of the client hello message into out
-  // The required TLS extensions are already done for you
-  //
-  // The client does not have to restore a previous session.
+  // Write the handshake message identifier
+  out[0] = 0x01;
+
+  // Write the length of the handshake message:
+  // NOTE: Total length of the message = length - handshake identifier - length field
+  //                                   = 55 bytes - 1 byte - 3 bytes = 51 bytes
+  //                                   = 0x33 in big-endian
+  //                                   = 0x00 0x00 0x33 using three bytes
+  out[1] = 0x00;
+  out[2] = 0x00;
+  out[3] = 0x33;
 
   // Write the protocol version
-  out[0] = hello->version.major;
-  out[1] = hello->version.minor;
+  out[4] = hello->version.major;
+  out[5] = hello->version.minor;
 
-  // Write the client timestamp
-  uint32_t gmt_unix_time = htons(hello->random.gmt_unix_time);
-  memcpy(out + 2, &gmt_unix_time, 4);
+  // Write the client timestamp (convert to network byte order)
+  uint32_t gmt_unix_time = htonl(hello->random.gmt_unix_time);
+  memcpy(out + 6, &gmt_unix_time, 4);
 
   // Write the client random bytes
-  memcpy(out + 6, hello->random.random_bytes, 28);
+  memcpy(out + 10, hello->random.random_bytes, 28);
 
   // Write the session id (0 as we do not want to restore a previous session)
-  out[34] = 0;
+  out[38] = 0;
 
-  // Write the cipher suites length
-  out[35] = 0x00;
-  out[36] = 0x02;
+  // Write the cipher suites length (0x0002 in big-endian)
+  out[39] = 0x00;
+  out[40] = 0x02;
 
-  // Write the actual cipher suite
+  // Write the actual cipher suite (convert to network byte order)
   uint16_t cipher_suite = htons(hello->cipher_suite);
-  memcpy(out + 37, &cipher_suite, 2);
+  memcpy(out + 41, &cipher_suite, 2);
 
   // Write the compression methods length (1 byte)
-  out[39] = 0x01;
+  out[43] = 0x01;
 
   // Write the actual compression method (0x00 for no compression)
-  out[40] = hello->compression_method;
+  out[44] = hello->compression_method;
 
   // Write TLS extensions
-  num_to_bytes(8, out + 45, 2);   // Length of the extensions
-  num_to_bytes(0xd, out + 47, 2); // Extension type: signature algorithms
-  num_to_bytes(0x4, out + 49, 2); // Length of the extension data
-  num_to_bytes(0x2, out + 51, 2); // Length of the provided list of algorithms
-  num_to_bytes(hello->sig_algo, out + 53, 2); // A single algorithm
+  // Total length of extensions (2 bytes, 0x0008 in big-endian)
+  uint16_t ext_len = htons(0x0008);
+  memcpy(out + 45, &ext_len, 2);
+
+  // Extension type: signature algorithms (2 bytes, 0x000d in big-endian)
+  uint16_t ext_type = htons(0x000d);
+  memcpy(out + 47, &ext_type, 2);
+
+  // Length of the extension data (2 bytes, 0x0004 in big-endian)
+  uint16_t ext_data_len = htons(0x0004);
+  memcpy(out + 49, &ext_data_len, 2);
+
+  // Length of the provided list of algorithms (2 bytes, 0x0002 in big-endian)
+  uint16_t algo_list_len = htons(0x0002);
+  memcpy(out + 51, &algo_list_len, 2);
+
+  // A single algorithm (2 bytes)
+  uint16_t sig_algo = htons(hello->sig_algo);
+  memcpy(out + 53, &sig_algo, 2);
 
   // Return the length of the marshalled message
   return len;
 }
-
 int client_hello_send(struct tls_context *ctx) {
   struct client_hello hello;
   client_hello_init(&hello);
