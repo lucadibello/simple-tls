@@ -558,9 +558,48 @@ X509 *server_cert_recv(const struct tls_context *ctx) {
   // TODO: read the certificate chain and return the first certificate (you may
   // assume that there is only one certificate) Hint: use the d2i_X509 OpenSSL
   // function to deserialize the DER-encoded structure
-  X509 *cert = NULL;
 
+  // Offset to start reading the cerficate data
+  // NOTE: Skip both the message type and the length field from the record fragment
+  size_t offset = 4;
+
+  // Read the length of the cerificate chain
+  // NOTE: The length is stored in 3 bytes (big-endian)
+  // We need also to convert the length to host byte order
+  uint32_t cert_list_len = (record.fragment[offset] << 16) |
+                           (record.fragment[offset + 1] << 8) |
+                           record.fragment[offset + 2];
+  offset += 3;
+
+  // Read the length of the first certificate
+  // NOTE: Similarly as above, we need to convert the length to host byte order
+  uint32_t cert_len = (record.fragment[offset] << 16) |
+                      (record.fragment[offset + 1] << 8) |
+                      record.fragment[offset + 2];
+  offset += 3; 
+
+  // Ensure that the certificate length is valid
+  // NOTE: The certificate length should be less than the length of the record fragment
+  // as we need to read the entire certificate
+  if (cert_len > record.length - offset)
+    goto error_handling;
+ 
+  // Ensure that the cerficate chain length is valid
+  // NOTE: If the length of a single certificate is greater than the length of the certificate chain,
+  // then there is an error
+  else if (cert_len >= cert_list_len)
+    goto error_handling;
+
+  // Deserialize the DER-encoded certificate using OpenSSL d2i_X509 function
+  const uint8_t *p = record.fragment + offset;
+  X509 *cert = d2i_X509(NULL, &p, cert_len);
+  if (!cert)
+    goto error_handling;
+
+  // Free resources
   tls_record_free(&record);
+ 
+  // Return the certificate
   return cert;
 error_handling:
   tls_record_free(&record);
