@@ -24,78 +24,78 @@ simple-tls is a lightweight and straightforward implementation of the TLS (Trans
 
 1. Install Homebrew if you haven't already:
 
-   ```sh
-   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-   ```
+```sh
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+```
 
 2. Install OpenSSL using Homebrew:
 
-   ```sh
-   brew install openssl
-   ```
+```sh
+brew install openssl
+```
 
 3. Clone the repository:
 
-   ```sh
-   git clone https://github.com/yourusername/simple-tls.git
-   cd simple-tls
-   ```
+```sh
+git clone https://github.com/yourusername/simple-tls.git
+cd simple-tls
+```
 
 4. Build the project:
 
-   ```sh
-   make
-   ```
+```sh
+make
+```
 
 ### Linux
 
 1. Install OpenSSL and gcc if you haven't already:
 
-   ```sh
-   sudo apt-get update
-   sudo apt-get install -y openssl libssl-dev gcc make
-   ```
+```sh
+sudo apt-get update
+sudo apt-get install -y openssl libssl-dev gcc make
+```
 
 2. Clone the repository:
 
-   ```sh
-   git clone https://github.com/yourusername/simple-tls.git
-   cd simple-tls
-   ```
+```sh
+git clone https://github.com/yourusername/simple-tls.git
+cd simple-tls
+```
 
 3. Build the project:
 
-   ```sh
-   make
-   ```
+```sh
+make
+```
 
 ## Usage
 
 ### Running the Client
 
-    ```sh
-    ./build/simple_tls
-    ```
+```sh
+./build/simple_tls
+```
 
 ### Running the Server
 
-    ```sh
-    ./build/tls_server
-    ```
+```sh
+./build/tls_server
+```
 
 ## Testing
 
 The project includes unit tests to ensure the correct functionality of various components. To run the tests, use the following commands:
 
-    ```sh
-    make check
-    ```
+```sh
+make check
+```
 
 To run tests with Valgrind for memory leak detection:
 
-    ```sh
-    make check-valgrind
-    ```
+```sh
+make check-valgrind
+```
 
 ## Project Structure
 
